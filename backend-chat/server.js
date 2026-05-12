@@ -13,8 +13,9 @@ const Anthropic = require('@anthropic-ai/sdk');
 // ---------------------------------------------------------------------------
 
 const PORT = 3001;
-
-const FROSTED_GLASS_THRESHOLD = 15;
+const PHOTO_REVEAL_THRESHOLD  = 5;                      // frosted_glass_unlocked
+const COOLDOWN_THRESHOLD      = 10;                     // 5-hour cooldown activates
+const COOLDOWN_DURATION_MS    = 5 * 60 * 60 * 1000;    // 5 hours in ms
 const MINIMUM_STAKE_TO_INITIATE = 1;
 
 // ---------------------------------------------------------------------------
@@ -36,10 +37,7 @@ app.use(express.json());
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-  },
+  cors: { origin: '*', methods: ['GET', 'POST'] },
 });
 
 // ---------------------------------------------------------------------------
@@ -47,78 +45,76 @@ const io = new Server(server, {
 // NOTE: Replace all stores with Redis before horizontal scaling.
 // ---------------------------------------------------------------------------
 
-/** Maps a userId to the socket.id of their active connection. @type {Map<string, string>} */
+/** userId → active socketId. @type {Map<string, string>} */
 const userSockets = new Map();
 
-/** Tracks messages exchanged per conversation — solely for Frosted Glass. @type {Map<string, number>} */
+/** conversationKey → total messages delivered (drives both thresholds). @type {Map<string, number>} */
 const messageCounts = new Map();
 
-/** Tracks payment verification per conversation. @type {Map<string, boolean>} */
+/** conversationKey → true once verifyPayment succeeds. @type {Map<string, boolean>} */
 const paymentVerifiedSessions = new Map();
 
+/** conversationKey → true when AI sentinel trips the hard paywall. @type {Map<string, boolean>} */
+const chatLockedSessions = new Map();
+
+/** conversationKey → epoch ms when the 5-hour cooldown began. @type {Map<string, number>} */
+const cooldownSessions = new Map();
+
 // ---------------------------------------------------------------------------
-// PII detection
+// AI Sentinel — PII + physical address / location detection
 // ---------------------------------------------------------------------------
 
-/**
- * Regex-based PII patterns.
- * Short-circuits before the (slower) AI semantic check when a match is found.
- */
 const PII_PATTERNS = [
-  /\b\d{10}\b/,                                                    // 10-digit phone
-  /\b(\+91|0091|91)?[-\s]?\d{5}[-\s]?\d{5}\b/,                   // Indian mobile
-  /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/,           // email
-  /@[a-zA-Z0-9_.]{2,}/,                                           // @handle
-  /\b(wa\.me|t\.me|instagram\.com|snapchat\.com|telegram\.me)\b/i, // messaging links
-  /\b[2-9]{1}[0-9]{3}[\s]?[0-9]{4}[\s]?[0-9]{4}\b/,             // Aadhaar-like (12 digits)
+  /\b\d{10}\b/,
+  /\b(\+91|0091|91)?[-\s]?\d{5}[-\s]?\d{5}\b/,
+  /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/,
+  /@[a-zA-Z0-9_.]{2,}/,
+  /\b(wa\.me|t\.me|instagram\.com|snapchat\.com|telegram\.me)\b/i,
+  /\b[2-9]{1}[0-9]{3}[\s]?[0-9]{4}[\s]?[0-9]{4}\b/,
 ];
 
 /** @param {string} content @returns {boolean} */
 function hasPiiRegex(content) {
-  return PII_PATTERNS.some((pattern) => pattern.test(content));
+  return PII_PATTERNS.some((p) => p.test(content));
 }
 
+const SENTINEL_SYSTEM_PROMPT =
+  'You are a strict safety and PII detection engine. Analyze the text for: ' +
+  '(1) any obfuscated phone numbers, emails, or social media handles ' +
+  '(e.g., spelled-out numbers, spaced-out digits, missing @ symbols, letter-number replacements); ' +
+  '(2) physical addresses or location meeting points ' +
+  '(e.g., street addresses, landmarks, neighbourhoods, GPS coordinates, ' +
+  'or any suggestion to meet at a specific physical place). ' +
+  'Respond ONLY with a valid JSON object: {"pii_detected": true/false}';
+
 /**
- * AI semantic PII check using claude-haiku-4-5 for binary classification.
- * Fail-open: returns false on any error so legitimate messages are never
- * dropped due to an API outage.
- *
- * @param {string} content
- * @returns {Promise<boolean>}
+ * Semantic bypass-detection via claude-3-haiku-20240307.
+ * Fail-open: returns false on API error or malformed JSON so real messages
+ * are never silently dropped due to an outage.
+ * @param {string} content @returns {Promise<boolean>}
  */
 async function hasPiiSemantic(content) {
   if (!anthropicClient) return false;
-
   try {
     const response = await anthropicClient.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 16,
-      messages: [
-        {
-          role: 'user',
-          content:
-            `Does the following message contain personal contact information such as ` +
-            `phone numbers, email addresses, social media handles, messaging app links, ` +
-            `or government ID numbers? Reply with exactly one word: YES or NO.\n\nMessage: ${content}`,
-        },
-      ],
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 64,
+      system: SENTINEL_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content }],
     });
-
-    const reply = response.content[0]?.text?.trim().toUpperCase() ?? '';
-    return reply === 'YES';
+    const raw = response.content[0]?.text?.trim() ?? '';
+    const parsed = JSON.parse(raw);
+    return parsed.pii_detected === true;
   } catch {
-    return false; // fail-open
+    return false;
   }
 }
 
 /**
- * Two-stage PII detection: regex first (sync, fast), then AI (async, semantic).
- * The regex short-circuits so AI is only called when regex passes.
- *
- * @param {string} content
- * @returns {Promise<boolean>}
+ * Two-stage detection: regex short-circuits before the AI call.
+ * @param {string} content @returns {Promise<boolean>}
  */
-async function detectPii(content) {
+async function detectViolation(content) {
   if (hasPiiRegex(content)) return true;
   return hasPiiSemantic(content);
 }
@@ -127,14 +123,9 @@ async function detectPii(content) {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Returns a stable, order-independent key for the conversation between two users.
- * @param {string} userA
- * @param {string} userB
- * @returns {string}
- */
-function conversationKey(userA, userB) {
-  return [userA, userB].sort().join(':');
+/** @param {string} a @param {string} b @returns {string} */
+function conversationKey(a, b) {
+  return [a, b].sort().join(':');
 }
 
 // ---------------------------------------------------------------------------
@@ -149,14 +140,12 @@ io.use((socket, next) => {
   }
 
   const balance = typeof stakeBalance === 'number' ? stakeBalance : 0;
-
   if (balance < MINIMUM_STAKE_TO_INITIATE) {
     return next(new Error('STAKE_INSUFFICIENT'));
   }
 
   socket.data.userId = userId.trim();
   socket.data.stakeBalance = balance;
-
   next();
 });
 
@@ -166,22 +155,22 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
   const { userId } = socket.data;
-
   userSockets.set(userId, socket.id);
   console.log(`[connect]    userId=${userId}  socketId=${socket.id}`);
 
   // -------------------------------------------------------------------------
-  // Event: sendMessage
+  // sendMessage
   //
-  // Payload: { toUserId: string, content: string }
-  //
-  // Business rules:
-  //   1. Run PII detection (regex + AI) on every message.
-  //   2. If PII detected and payment not verified → block + emit system_warning.
-  //   3. Increment the per-conversation message count.
-  //   4. Deliver the message to the recipient (if online) and echo to sender.
-  //   5. When the count reaches FROSTED_GLASS_THRESHOLD, emit
-  //      'frosted_glass_unlocked' to BOTH participants exactly once.
+  // Gate order:
+  //   1. Payload validation
+  //   2. Hard paywall (chatLockedSessions) — set by AI sentinel on violation
+  //   3. Cooldown gate (cooldownSessions)  — set at COOLDOWN_THRESHOLD messages
+  //   4. AI Sentinel — detects PII + addresses on every message
+  //      → violation + !paymentVerified → lock chat for both users
+  //   5. Deliver message + increment count
+  //   6. Threshold side-effects:
+  //      count === PHOTO_REVEAL_THRESHOLD  → frosted_glass_unlocked
+  //      count === COOLDOWN_THRESHOLD      → cooldown_activated
   // -------------------------------------------------------------------------
   socket.on('sendMessage', async ({ toUserId, content }) => {
     try {
@@ -196,18 +185,53 @@ io.on('connection', (socket) => {
       }
 
       const key = conversationKey(userId, toUserId);
+      const recipientSocketId = userSockets.get(toUserId);
 
-      // ----- PII Shield (runs on every message, independent of message count) -----
-      const piiDetected = await detectPii(content);
-      if (piiDetected && !paymentVerifiedSessions.get(key)) {
+      // ── Gate 1: Hard paywall ────────────────────────────────────────────
+      if (chatLockedSessions.get(key)) {
         socket.emit('system_warning', {
-          code: 'PII_BLOCKED',
-          message: 'Premium Feature: Payment is required to share contact details or social handles.',
+          code: 'CHAT_LOCKED',
+          message: 'Safety/Premium violation detected',
         });
         return;
       }
 
-      // ----- Message delivery -----
+      // ── Gate 2: Cooldown ────────────────────────────────────────────────
+      const cooldownStart = cooldownSessions.get(key);
+      if (cooldownStart !== undefined) {
+        const expiresAt = cooldownStart + COOLDOWN_DURATION_MS;
+        if (Date.now() < expiresAt) {
+          socket.emit('system_warning', {
+            code: 'COOLDOWN_ACTIVE',
+            message: 'Cooldown active',
+          });
+          return;
+        }
+        // Cooldown has expired — clear it and allow the message
+        cooldownSessions.delete(key);
+      }
+
+      // ── Gate 3: AI Sentinel ─────────────────────────────────────────────
+      const violationDetected = await detectViolation(content);
+      if (violationDetected && !paymentVerifiedSessions.get(key)) {
+        chatLockedSessions.set(key, true);
+        const lockPayload = { conversationKey: key, lockedAt: Date.now() };
+
+        socket.emit('system_warning', {
+          code: 'VIOLATION_DETECTED',
+          message: 'Safety/Premium violation detected',
+        });
+        socket.emit('chat_locked', lockPayload);
+
+        if (recipientSocketId) {
+          io.to(recipientSocketId).emit('chat_locked', lockPayload);
+        }
+
+        console.log(`[chat_locked]  key=${key}  triggeredBy=${userId}`);
+        return;
+      }
+
+      // ── Deliver message ─────────────────────────────────────────────────
       const newCount = (messageCounts.get(key) ?? 0) + 1;
       messageCounts.set(key, newCount);
 
@@ -219,41 +243,45 @@ io.on('connection', (socket) => {
         timestamp: Date.now(),
       };
 
-      const recipientSocketId = userSockets.get(toUserId);
       if (recipientSocketId) {
         io.to(recipientSocketId).emit('receiveMessage', messagePayload);
       }
-
       socket.emit('receiveMessage', messagePayload);
 
-      // ----- Frosted Glass unlock (solely triggered by message count) -----
-      if (newCount === FROSTED_GLASS_THRESHOLD) {
-        const unlockPayload = {
-          conversationKey: key,
-          unlockedAt: Date.now(),
-        };
-
+      // ── Threshold: photo reveal ─────────────────────────────────────────
+      if (newCount === PHOTO_REVEAL_THRESHOLD) {
+        const unlockPayload = { conversationKey: key, unlockedAt: Date.now() };
         socket.emit('frosted_glass_unlocked', unlockPayload);
-
         if (recipientSocketId) {
           io.to(recipientSocketId).emit('frosted_glass_unlocked', unlockPayload);
         }
+        console.log(`[frosted_glass_unlocked]  key=${key}`);
+      }
 
-        console.log(`[frosted_glass_unlocked] key=${key}`);
+      // ── Threshold: cooldown ─────────────────────────────────────────────
+      if (newCount === COOLDOWN_THRESHOLD) {
+        const activatedAt = Date.now();
+        cooldownSessions.set(key, activatedAt);
+        const cooldownPayload = {
+          conversationKey: key,
+          activatedAt,
+          expiresAt: activatedAt + COOLDOWN_DURATION_MS,
+        };
+        socket.emit('cooldown_activated', cooldownPayload);
+        if (recipientSocketId) {
+          io.to(recipientSocketId).emit('cooldown_activated', cooldownPayload);
+        }
+        console.log(`[cooldown_activated]  key=${key}`);
       }
     } catch (err) {
-      console.error(`[sendMessage] unhandled error for userId=${userId}:`, err);
+      console.error(`[sendMessage] unhandled error userId=${userId}:`, err);
       socket.emit('error', { code: 'SERVER_ERROR', message: 'An internal error occurred.' });
     }
   });
 
   // -------------------------------------------------------------------------
-  // Event: verifyPayment
-  //
-  // Placeholder — in production, validate a payment token/receipt against the
-  // FastAPI backend before setting this flag. Once verified, PII sharing is
-  // permitted for the lifetime of the in-memory session.
-  //
+  // verifyPayment — clears both the hard lock and the cooldown, then sets the
+  // payment-verified flag so PII is permitted going forward.
   // Payload: { toUserId: string, paymentToken: string }
   // -------------------------------------------------------------------------
   socket.on('verifyPayment', ({ toUserId }) => {
@@ -263,10 +291,19 @@ io.on('connection', (socket) => {
     }
 
     const key = conversationKey(userId, toUserId);
+    chatLockedSessions.delete(key);
+    cooldownSessions.delete(key);
     paymentVerifiedSessions.set(key, true);
 
-    socket.emit('payment_verified', { conversationKey: key, verifiedAt: Date.now() });
-    console.log(`[verifyPayment] key=${key} userId=${userId}`);
+    const payload = { conversationKey: key, verifiedAt: Date.now() };
+    socket.emit('payment_verified', payload);
+
+    const recipientSocketId = userSockets.get(toUserId);
+    if (recipientSocketId) {
+      io.to(recipientSocketId).emit('payment_verified', payload);
+    }
+
+    console.log(`[verifyPayment]  key=${key}  userId=${userId}`);
   });
 
   // -------------------------------------------------------------------------
@@ -285,7 +322,12 @@ io.on('connection', (socket) => {
 // ---------------------------------------------------------------------------
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'backend-chat', port: PORT });
+  res.json({
+    status: 'ok',
+    service: 'backend-chat',
+    port: PORT,
+    thresholds: { photoReveal: PHOTO_REVEAL_THRESHOLD, cooldown: COOLDOWN_THRESHOLD },
+  });
 });
 
 // ---------------------------------------------------------------------------
