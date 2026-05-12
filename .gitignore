@@ -32,5 +32,8 @@ Thumbs.db
 .vscode/
 .idea/
 
+# SQLite dev database
+*.db
+
 # Claude Code local settings
 .claude/
