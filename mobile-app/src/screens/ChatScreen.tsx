@@ -87,6 +87,14 @@ export default function ChatScreen({
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
 
+    // Without this handler, a failed connection attempt (server unreachable,
+    // wrong IP, Stake middleware rejection) fires an unhandled 'connect_error'
+    // event that Expo Go surfaces as an unhandled promise rejection crash.
+    socket.on('connect_error', (err: Error) => {
+      console.warn('[socket] connect_error:', err.message);
+      setConnected(false);
+    });
+
     socket.on('receiveMessage', (msg: ServerMessage) => {
       setMessages(prev => [
         ...prev,
@@ -111,6 +119,7 @@ export default function ChatScreen({
     return () => {
       socket.off('connect');
       socket.off('disconnect');
+      socket.off('connect_error');
       socket.off('receiveMessage');
       socket.off('frosted_glass_unlocked');
     };
