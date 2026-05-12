@@ -220,9 +220,13 @@ app.get('/health', (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Start
+// Start (only when run directly; not when required by tests)
 // ---------------------------------------------------------------------------
 
-server.listen(PORT, () => {
-  console.log(`[backend-chat] Socket.io server listening on port ${PORT}`);
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`[backend-chat] Socket.io server listening on port ${PORT}`);
+  });
+}
+
+module.exports = { app, server, io };
