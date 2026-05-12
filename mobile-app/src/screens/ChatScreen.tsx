@@ -5,6 +5,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  SafeAreaView,
   StyleSheet,
   Text,
   TextInput,
@@ -202,7 +203,7 @@ export default function ChatScreen({
   const [messageCount, setCount]        = useState(0);
   const [isBlurred, setIsBlurred]       = useState(true);
   const [isConnected, setConnected]     = useState(false);
-  const [isChatLocked, setIsChatLocked] = useState(false);
+  const [systemBlock, setSystemBlock]   = useState(false);
   const [isCooldown, setIsCooldown]     = useState(false);
   const [warning, setWarning]           = useState<string | null>(null);
 
@@ -213,7 +214,7 @@ export default function ChatScreen({
     Array.from({ length: GALLERY_SIZE }, () => new Animated.Value(1)),
   ).current;
 
-  const isInputBlocked = isChatLocked || isCooldown;
+  const isInputBlocked = systemBlock || isCooldown;
 
   // ── Socket lifecycle ────────────────────────────────────────────────────
 
@@ -257,12 +258,8 @@ export default function ChatScreen({
       ).start();
     });
 
-    socket.on('system_warning', (payload: SystemWarningPayload) => {
-      setWarning(payload.message);
-    });
-
-    socket.on('chat_locked', (_payload: ChatLockedPayload) => {
-      setIsChatLocked(true);
+    socket.on('SYSTEM_BLOCK', (_payload: { reason: string }) => {
+      setSystemBlock(true);
       setWarning('Safety/Premium violation detected');
     });
 
@@ -272,7 +269,7 @@ export default function ChatScreen({
     });
 
     socket.on('payment_verified', (_payload: PaymentVerifiedPayload) => {
-      setIsChatLocked(false);
+      setSystemBlock(false);
       setIsCooldown(false);
       setWarning(null);
     });
@@ -283,8 +280,7 @@ export default function ChatScreen({
       socket.off('connect_error');
       socket.off('receiveMessage');
       socket.off('frosted_glass_unlocked');
-      socket.off('system_warning');
-      socket.off('chat_locked');
+      socket.off('SYSTEM_BLOCK');
       socket.off('cooldown_activated');
       socket.off('payment_verified');
     };
@@ -328,133 +324,137 @@ export default function ChatScreen({
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
-    <KeyboardAvoidingView
-      style={styles.root}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={90}
-    >
-      {/* ── Status bar ─────────────────────────────────────────────────── */}
-      <View style={styles.statusBar}>
-        <View style={styles.statusLeft}>
-          <View style={[styles.dot, { backgroundColor: isConnected ? '#22C55E' : SLATE }]} />
-          <Text style={styles.statusName} numberOfLines={1}>{partnerUserId}</Text>
-        </View>
-        <Text style={styles.statusHint}>
-          {isBlurred ? 'Gallery locked' : 'Gallery unlocked ✨'}
-        </Text>
-      </View>
-
-      {/* ── Match Profile header ────────────────────────────────────────── */}
-      <View style={styles.profileCard}>
-        <Text style={styles.profileCardTitle}>Match Profile</Text>
-        <View style={styles.profileRow}>
-          <PrimaryVibePhoto />
-          <LockedGallery blurAnims={blurAnims} isBlurred={isBlurred} />
-        </View>
-
-        {isBlurred ? (
-          <View style={styles.progressWrapper}>
-            <View style={styles.progressHeader}>
-              <Text style={styles.progressLabel}>
-                Gallery unlocks after {PHOTO_REVEAL_THRESHOLD} messages
-              </Text>
-              <Text style={styles.progressCount}>
-                {messageCount}/{PHOTO_REVEAL_THRESHOLD}
-              </Text>
-            </View>
-            <View style={styles.progressTrack}>
-              <View
-                style={[
-                  styles.progressFill,
-                  { width: `${progressPct * 100}%` as `${number}%` },
-                ]}
-              />
-            </View>
-          </View>
-        ) : (
-          <View style={styles.unlockedBanner}>
-            <Text style={styles.unlockedText}>
-              ✨ Photos revealed — trust established
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
+      <View style={{ flex: 1 }}>
+        {/* ── System warning banner — docked at top, outside KAV ──────── */}
+        {warning !== null && (
+          <View style={[
+            styles.warningBanner,
+            systemBlock ? styles.warningBannerDanger : styles.warningBannerAmber,
+          ]}>
+            <Text style={[
+              styles.warningText,
+              systemBlock ? styles.warningTextDanger : styles.warningTextAmber,
+            ]}>
+              {warning}
             </Text>
+            {systemBlock && (
+              <Text style={styles.warningSubtext}>
+                Unlock chat to continue
+              </Text>
+            )}
+            {isCooldown && !systemBlock && (
+              <Text style={styles.warningSubtext}>
+                Chat resumes in 5 hours
+              </Text>
+            )}
           </View>
         )}
-      </View>
 
-      {/* ── Divider ─────────────────────────────────────────────────────── */}
-      <View style={styles.divider} />
-
-      {/* ── Message list ────────────────────────────────────────────────── */}
-      <FlatList
-        ref={listRef}
-        style={styles.list}
-        data={messages}
-        keyExtractor={item => item.id}
-        renderItem={renderMessage}
-        contentContainerStyle={styles.listContent}
-        ListEmptyComponent={
-          <Text style={styles.emptyHint}>Send a message to start the conversation.</Text>
-        }
-      />
-
-      {/* ── System warning banner ────────────────────────────────────────── */}
-      {warning !== null && (
-        <View style={[
-          styles.warningBanner,
-          isChatLocked ? styles.warningBannerDanger : styles.warningBannerAmber,
-        ]}>
-          <Text style={[
-            styles.warningText,
-            isChatLocked ? styles.warningTextDanger : styles.warningTextAmber,
-          ]}>
-            {warning}
-          </Text>
-          {isChatLocked && (
-            <Text style={styles.warningSubtext}>
-              Unlock chat to continue
-            </Text>
-          )}
-          {isCooldown && !isChatLocked && (
-            <Text style={styles.warningSubtext}>
-              Chat resumes in 5 hours
-            </Text>
-          )}
-        </View>
-      )}
-
-      {/* ── Input bar ───────────────────────────────────────────────────── */}
-      <View style={[styles.inputBar, isInputBlocked && styles.inputBarBlocked]}>
-        <TextInput
-          style={[styles.input, isInputBlocked && styles.inputDisabled]}
-          value={inputText}
-          onChangeText={setInputText}
-          placeholder={
-            isChatLocked  ? 'Chat locked — payment required'  :
-            isCooldown    ? 'Cooldown active — chat paused'    :
-                            'Type a message…'
-          }
-          placeholderTextColor={isInputBlocked ? DANGER + '90' : SLATE}
-          onSubmitEditing={handleSend}
-          returnKeyType="send"
-          multiline={false}
-          editable={!isInputBlocked}
-        />
-        <Pressable
-          style={({ pressed }) => [
-            styles.sendButton,
-            pressed && !isInputBlocked && styles.sendButtonPressed,
-            isInputBlocked && styles.sendButtonDisabled,
-          ]}
-          onPress={handleSend}
-          disabled={isInputBlocked}
-          accessibilityRole="button"
-          accessibilityLabel="Send message"
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={90}
         >
-          <Text style={[styles.sendButtonText, isInputBlocked && styles.sendButtonTextDisabled]}>
-            {isChatLocked ? 'Locked' : isCooldown ? 'Paused' : 'Send'}
-          </Text>
-        </Pressable>
+          {/* ── Status bar ───────────────────────────────────────────── */}
+          <View style={styles.statusBar}>
+            <View style={styles.statusLeft}>
+              <View style={[styles.dot, { backgroundColor: isConnected ? '#22C55E' : SLATE }]} />
+              <Text style={styles.statusName} numberOfLines={1}>{partnerUserId}</Text>
+            </View>
+            <Text style={styles.statusHint}>
+              {isBlurred ? 'Gallery locked' : 'Gallery unlocked ✨'}
+            </Text>
+          </View>
+
+          {/* ── Match Profile header ─────────────────────────────────── */}
+          <View style={styles.profileCard}>
+            <Text style={styles.profileCardTitle}>Match Profile</Text>
+            <View style={styles.profileRow}>
+              <PrimaryVibePhoto />
+              <LockedGallery blurAnims={blurAnims} isBlurred={isBlurred} />
+            </View>
+
+            {isBlurred ? (
+              <View style={styles.progressWrapper}>
+                <View style={styles.progressHeader}>
+                  <Text style={styles.progressLabel}>
+                    Gallery unlocks after {PHOTO_REVEAL_THRESHOLD} messages
+                  </Text>
+                  <Text style={styles.progressCount}>
+                    {messageCount}/{PHOTO_REVEAL_THRESHOLD}
+                  </Text>
+                </View>
+                <View style={styles.progressTrack}>
+                  <View
+                    style={[
+                      styles.progressFill,
+                      { width: `${progressPct * 100}%` as `${number}%` },
+                    ]}
+                  />
+                </View>
+              </View>
+            ) : (
+              <View style={styles.unlockedBanner}>
+                <Text style={styles.unlockedText}>
+                  ✨ Photos revealed — trust established
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* ── Divider ──────────────────────────────────────────────── */}
+          <View style={styles.divider} />
+
+          {/* ── Message list ─────────────────────────────────────────── */}
+          <FlatList
+            ref={listRef}
+            style={styles.list}
+            data={messages}
+            keyExtractor={item => item.id}
+            renderItem={renderMessage}
+            contentContainerStyle={styles.listContent}
+            ListEmptyComponent={
+              <Text style={styles.emptyHint}>Send a message to start the conversation.</Text>
+            }
+          />
+
+          {/* ── Input bar ────────────────────────────────────────────── */}
+          <View style={[styles.inputBar, isInputBlocked && styles.inputBarBlocked]}>
+            <TextInput
+              style={[styles.input, isInputBlocked && styles.inputDisabled]}
+              value={inputText}
+              onChangeText={setInputText}
+              placeholder={
+                systemBlock ? 'Chat locked — payment required'  :
+                isCooldown  ? 'Cooldown active — chat paused'    :
+                              'Type a message…'
+              }
+              placeholderTextColor={isInputBlocked ? DANGER + '90' : SLATE}
+              onSubmitEditing={handleSend}
+              returnKeyType="send"
+              multiline={false}
+              editable={!isInputBlocked}
+            />
+            <Pressable
+              style={({ pressed }) => [
+                styles.sendButton,
+                pressed && !isInputBlocked && styles.sendButtonPressed,
+                isInputBlocked && styles.sendButtonDisabled,
+              ]}
+              onPress={handleSend}
+              disabled={isInputBlocked}
+              accessibilityRole="button"
+              accessibilityLabel="Send message"
+            >
+              <Text style={[styles.sendButtonText, isInputBlocked && styles.sendButtonTextDisabled]}>
+                {systemBlock ? 'Locked' : isCooldown ? 'Paused' : 'Send'}
+              </Text>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
       </View>
-    </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
@@ -463,7 +463,7 @@ export default function ChatScreen({
 // ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: NAVY },
+  root: { flex: 1 },
 
   // Status bar
   statusBar: {
@@ -524,7 +524,7 @@ const styles = StyleSheet.create({
 
   // Message list
   list: { flex: 1 },
-  listContent: { paddingHorizontal: 16, paddingVertical: 12, gap: 8, flexGrow: 1 },
+  listContent: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 20, gap: 8, flexGrow: 1 },
   emptyHint:   { color: SLATE, fontSize: 13, textAlign: 'center', marginTop: 32 },
 
   // Bubbles
