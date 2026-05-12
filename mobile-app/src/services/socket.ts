@@ -38,7 +38,7 @@ export type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 // Replace the URL with an environment variable / config when deploying.
 // ---------------------------------------------------------------------------
 
-const CHAT_SERVER_URL = 'http://localhost:3001';
+const CHAT_SERVER_URL = 'http://192.168.68.114:3001';
 
 let _socket: AppSocket | null = null;
 
