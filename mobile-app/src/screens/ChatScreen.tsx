@@ -155,7 +155,7 @@ function LockedGallery({ blurAnims, isBlurred }: LockedGalleryProps): React.JSX.
 }
 
 const galleryStyles = StyleSheet.create({
-  root:  { flex: 1, gap: 6 },
+  root:  { flexShrink: 0, gap: 6 },
   label: {
     color: SLATE,
     fontSize: 11,
@@ -326,9 +326,13 @@ export default function ChatScreen({
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
-      <View style={{ flex: 1 }}>
-        {/* ── System warning banner — docked at top, outside KAV ──────── */}
+    <SafeAreaView style={{ flex: 1 }}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={90}
+      >
+        {/* ── System warning banner ────────────────────────────────────── */}
         {warning !== null && (
           <View style={[
             styles.warningBanner,
@@ -353,12 +357,9 @@ export default function ChatScreen({
           </View>
         )}
 
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          keyboardVerticalOffset={90}
-        >
-          {/* ── Status bar ───────────────────────────────────────────── */}
+        {/* ── Gallery section (flexShrink: 0 prevents vertical expansion) ── */}
+        <View style={{ flexShrink: 0 }}>
+          {/* ── Status bar ─────────────────────────────────────────────── */}
           <View style={styles.statusBar}>
             <View style={styles.statusLeft}>
               <View style={[styles.dot, { backgroundColor: isConnected ? '#22C55E' : SLATE }]} />
@@ -369,7 +370,7 @@ export default function ChatScreen({
             </Text>
           </View>
 
-          {/* ── Match Profile header ─────────────────────────────────── */}
+          {/* ── Match Profile header ──────────────────────────────────── */}
           <View style={styles.profileCard}>
             <Text style={styles.profileCardTitle}>Match Profile</Text>
             <View style={styles.profileRow}>
@@ -407,59 +408,59 @@ export default function ChatScreen({
 
           {/* ── Divider ──────────────────────────────────────────────── */}
           <View style={styles.divider} />
+        </View>
 
-          {/* ── Message list ─────────────────────────────────────────── */}
-          <View style={{ flex: 1 }}>
-            <FlatList
-              ref={listRef}
-              style={{ flex: 1 }}
-              data={messages}
-              keyExtractor={item => item.id}
-              renderItem={renderMessage}
-              contentContainerStyle={styles.listContent}
-              ListEmptyComponent={
-                <Text style={styles.emptyHint}>Send a message to start the conversation.</Text>
-              }
-            />
-          </View>
+        {/* ── Message list (flex: 1 + minHeight guards against crush) ─── */}
+        <View style={{ flex: 1, minHeight: 150, paddingHorizontal: 10 }}>
+          <FlatList
+            ref={listRef}
+            style={{ flex: 1 }}
+            data={messages}
+            keyExtractor={item => item.id}
+            renderItem={renderMessage}
+            contentContainerStyle={styles.listContent}
+            ListEmptyComponent={
+              <Text style={styles.emptyHint}>Send a message to start the conversation.</Text>
+            }
+          />
+        </View>
 
-          {/* ── Input bar ────────────────────────────────────────────── */}
-          <View style={[styles.inputBar, isInputBlocked && styles.inputBarBlocked]}>
-            <TextInput
-              ref={inputRef}
-              style={[styles.input, isInputBlocked && styles.inputDisabled]}
-              value={inputText}
-              onChangeText={setInputText}
-              blurOnSubmit={false}
-              placeholder={
-                systemBlock ? 'Chat locked — payment required'  :
-                isCooldown  ? 'Cooldown active — chat paused'    :
-                              'Type a message…'
-              }
-              placeholderTextColor={isInputBlocked ? DANGER + '90' : SLATE}
-              onSubmitEditing={handleSend}
-              returnKeyType="send"
-              multiline={false}
-              editable={!isInputBlocked}
-            />
-            <Pressable
-              style={({ pressed }) => [
-                styles.sendButton,
-                pressed && !isInputBlocked && styles.sendButtonPressed,
-                isInputBlocked && styles.sendButtonDisabled,
-              ]}
-              onPress={handleSend}
-              disabled={isInputBlocked}
-              accessibilityRole="button"
-              accessibilityLabel="Send message"
-            >
-              <Text style={[styles.sendButtonText, isInputBlocked && styles.sendButtonTextDisabled]}>
-                {systemBlock ? 'Locked' : isCooldown ? 'Paused' : 'Send'}
-              </Text>
-            </Pressable>
-          </View>
-        </KeyboardAvoidingView>
-      </View>
+        {/* ── Input bar ───────────────────────────────────────────────── */}
+        <View style={[styles.inputBar, isInputBlocked && styles.inputBarBlocked]}>
+          <TextInput
+            ref={inputRef}
+            style={[styles.input, isInputBlocked && styles.inputDisabled]}
+            value={inputText}
+            onChangeText={setInputText}
+            blurOnSubmit={false}
+            placeholder={
+              systemBlock ? 'Chat locked — payment required'  :
+              isCooldown  ? 'Cooldown active — chat paused'    :
+                            'Type a message…'
+            }
+            placeholderTextColor={isInputBlocked ? DANGER + '90' : SLATE}
+            onSubmitEditing={handleSend}
+            returnKeyType="send"
+            multiline={false}
+            editable={!isInputBlocked}
+          />
+          <Pressable
+            style={({ pressed }) => [
+              styles.sendButton,
+              pressed && !isInputBlocked && styles.sendButtonPressed,
+              isInputBlocked && styles.sendButtonDisabled,
+            ]}
+            onPress={handleSend}
+            disabled={isInputBlocked}
+            accessibilityRole="button"
+            accessibilityLabel="Send message"
+          >
+            <Text style={[styles.sendButtonText, isInputBlocked && styles.sendButtonTextDisabled]}>
+              {systemBlock ? 'Locked' : isCooldown ? 'Paused' : 'Send'}
+            </Text>
+          </Pressable>
+        </View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
