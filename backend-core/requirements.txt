@@ -1,0 +1,10 @@
+fastapi[standard]
+sqlalchemy[asyncio]
+asyncpg
+pydantic>=2.0
+anthropic
+python-dotenv
+pytest
+pytest-asyncio
+httpx
+aiosqlite
