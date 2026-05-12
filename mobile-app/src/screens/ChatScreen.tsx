@@ -209,6 +209,7 @@ export default function ChatScreen({
 
   const socketRef = useRef<AppSocket | null>(null);
   const listRef   = useRef<FlatList<Message>>(null);
+  const inputRef  = useRef<TextInput>(null);
 
   const blurAnims = useRef<Animated.Value[]>(
     Array.from({ length: GALLERY_SIZE }, () => new Animated.Value(1)),
@@ -301,6 +302,7 @@ export default function ChatScreen({
     if (!text || !socketRef.current || isInputBlocked) return;
     socketRef.current.emit('sendMessage', { toUserId: partnerUserId, content: text });
     setInputText('');
+    inputRef.current?.focus();
   }, [inputText, partnerUserId, isInputBlocked]);
 
   // ── Message renderer ─────────────────────────────────────────────────────
@@ -407,24 +409,28 @@ export default function ChatScreen({
           <View style={styles.divider} />
 
           {/* ── Message list ─────────────────────────────────────────── */}
-          <FlatList
-            ref={listRef}
-            style={styles.list}
-            data={messages}
-            keyExtractor={item => item.id}
-            renderItem={renderMessage}
-            contentContainerStyle={styles.listContent}
-            ListEmptyComponent={
-              <Text style={styles.emptyHint}>Send a message to start the conversation.</Text>
-            }
-          />
+          <View style={{ flex: 1 }}>
+            <FlatList
+              ref={listRef}
+              style={{ flex: 1 }}
+              data={messages}
+              keyExtractor={item => item.id}
+              renderItem={renderMessage}
+              contentContainerStyle={styles.listContent}
+              ListEmptyComponent={
+                <Text style={styles.emptyHint}>Send a message to start the conversation.</Text>
+              }
+            />
+          </View>
 
           {/* ── Input bar ────────────────────────────────────────────── */}
           <View style={[styles.inputBar, isInputBlocked && styles.inputBarBlocked]}>
             <TextInput
+              ref={inputRef}
               style={[styles.input, isInputBlocked && styles.inputDisabled]}
               value={inputText}
               onChangeText={setInputText}
+              blurOnSubmit={false}
               placeholder={
                 systemBlock ? 'Chat locked — payment required'  :
                 isCooldown  ? 'Cooldown active — chat paused'    :
@@ -564,7 +570,7 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    paddingBottom: 28,
+    paddingBottom: 20,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: SLATE + '40',
     backgroundColor: NAVY,
