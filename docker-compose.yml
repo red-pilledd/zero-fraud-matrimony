@@ -1,0 +1,23 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:16
+    container_name: zfm_postgres
+    environment:
+      POSTGRES_USER: zfm_user
+      POSTGRES_PASSWORD: zfm_secret
+      POSTGRES_DB: zero_fraud_matrimony
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zfm_user -d zero_fraud_matrimony"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
