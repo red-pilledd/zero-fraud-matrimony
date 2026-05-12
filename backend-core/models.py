@@ -25,7 +25,12 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     # SHA-256 hex digest of government ID — raw ID is never stored (Zero-Fraud directive)
     identity_hash = Column(String(64), unique=True, nullable=False, index=True)
-    intent_silo = Column(SAEnum(IntentSilo, name="intent_silo_enum"), nullable=False)
+    # native_enum=False: stores as VARCHAR + CHECK constraint on all backends.
+    # SQLite has no native enum type; PostgreSQL would use one by default but
+    # VARCHAR + CHECK is portable and still enforces the allowed values at the
+    # DB layer. Switch to native_enum=True (and add create_type=True) when
+    # deploying to a dedicated PostgreSQL instance with Alembic migrations.
+    intent_silo = Column(SAEnum(IntentSilo, name="intent_silo_enum", native_enum=False), nullable=False)
     stake_balance = Column(Integer, nullable=False, default=0)
     reputation_score = Column(Integer, nullable=False, default=0)
     is_physically_verified = Column(Boolean, nullable=False, default=False)
