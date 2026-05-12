@@ -6,7 +6,7 @@
 
 \- \*\*Backend (Core Logic \& DB):\*\* Python (FastAPI), PostgreSQL, SQLAlchemy, Pydantic. Located in `/backend-core`.
 
-\- \*\*Backend (Real-time):\*\* Node.js, Socket.io. Located in `/backend-chat`.
+\- \*\*Backend (Real-time):\*\* Node.js, Socket.io. Located in `/backend-chat`. Runs on **port 3001**.
 
 \- \*\*Frontend (Mobile):\*\* React Native (Expo), TypeScript, Expo Router. Located in `/mobile-app`.
 
@@ -25,6 +25,16 @@
 5\. \*\*Aesthetic:\*\* Data-Driven Elegance. Navy, Slate, Gold.
 
 6\. \*\*AI Arbitrator:\*\* Onboarding is done via an AI interview blueprint, not static bios. All AI output must be validated against strict Pydantic schemas.
+
+
+
+\## PORT MAP
+
+\| Service | Stack | Port |
+\|---|---|---|
+\| backend-core | FastAPI (Python) | 8000 (uvicorn default) |
+\| backend-chat | Node.js / Socket.io | 3001 |
+\| mobile-app | Expo / React Native | 8081 (Metro bundler) |
 
 
 
