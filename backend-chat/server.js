@@ -85,7 +85,7 @@ const SENTINEL_SYSTEM_PROMPT =
   '(2) physical addresses or location meeting points ' +
   '(e.g., street addresses, landmarks, neighbourhoods, GPS coordinates, ' +
   'or any suggestion to meet at a specific physical place). ' +
-  'Respond ONLY with a valid JSON object: {"pii_detected": true/false}';
+  'Respond ONLY with the single word SAFE or VIOLATION. No punctuation, no explanation.';
 
 /**
  * Semantic bypass-detection via claude-3-haiku-20240307.
@@ -103,8 +103,7 @@ async function hasPiiSemantic(content) {
       messages: [{ role: 'user', content }],
     });
     const raw = response.content[0]?.text?.trim() ?? '';
-    const parsed = JSON.parse(raw);
-    return parsed.pii_detected === true;
+    return raw === 'VIOLATION';
   } catch {
     return false;
   }
@@ -214,20 +213,8 @@ io.on('connection', (socket) => {
       // ── Gate 3: AI Sentinel ─────────────────────────────────────────────
       const violationDetected = await detectViolation(content);
       if (violationDetected && !paymentVerifiedSessions.get(key)) {
-        chatLockedSessions.set(key, true);
-        const lockPayload = { conversationKey: key, lockedAt: Date.now() };
-
-        socket.emit('system_warning', {
-          code: 'VIOLATION_DETECTED',
-          message: 'Safety/Premium violation detected',
-        });
-        socket.emit('chat_locked', lockPayload);
-
-        if (recipientSocketId) {
-          io.to(recipientSocketId).emit('chat_locked', lockPayload);
-        }
-
-        console.log(`[chat_locked]  key=${key}  triggeredBy=${userId}`);
+        socket.emit('SYSTEM_BLOCK', { reason: 'VIOLATION' });
+        console.log(`[SYSTEM_BLOCK]  key=${key}  triggeredBy=${userId}`);
         return;
       }
 
