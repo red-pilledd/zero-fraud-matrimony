@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import DEV_MODE
 from database import get_db
 from models import Lead, User
 from schemas import LeadCreate, LeadPromoteRequest, LeadRead, UserRead
@@ -27,18 +28,20 @@ async def ingest_lead(payload: LeadCreate, db: DbSession) -> Lead:
     No identity hash is set at this stage — that happens when the lead
     completes Aadhaar upload and is promoted to a User.
     """
-    existing = await db.scalar(
-        select(Lead).where(Lead.phone_number == payload.phone_number)
-    )
-    if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Lead with phone number '{payload.phone_number}' already exists.",
+    if not DEV_MODE:
+        existing = await db.scalar(
+            select(Lead).where(Lead.phone_number == payload.phone_number)
         )
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Lead with phone number '{payload.phone_number}' already exists.",
+            )
 
     lead = Lead(
         phone_number=payload.phone_number,
         source=payload.source,
+        language_preference=payload.language_preference,
         ai_interview_completed=payload.ai_interview_completed,
         compatibility_blueprint=payload.compatibility_blueprint,
     )
@@ -80,6 +83,11 @@ async def promote_lead(
         select(User).where(User.identity_hash == identity_hash)
     )
     if hash_taken is not None:
+        if hash_taken.is_banned:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This identity has been permanently banned from the platform.",
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This identity is already registered. "
@@ -92,6 +100,8 @@ async def promote_lead(
         stake_balance=100,
         reputation_score=0,
         is_physically_verified=True,
+        compatibility_blueprint=lead.compatibility_blueprint,
+        lead_description=lead.lead_description,
     )
     db.add(user)
     await db.flush()

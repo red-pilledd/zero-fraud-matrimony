@@ -59,7 +59,9 @@ export type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 // Singleton socket — one connection for the app's lifetime.
 // ---------------------------------------------------------------------------
 
-const CHAT_SERVER_URL = 'http://192.168.68.114:3001';
+// Use localhost for browser testing. Switch to LAN IP (e.g. http://192.168.68.107:3001)
+// when testing on a physical Android/iOS device on the same network.
+const CHAT_SERVER_URL = 'http://localhost:3001';
 
 let _socket: AppSocket | null = null;
 

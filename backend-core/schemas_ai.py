@@ -36,3 +36,14 @@ class CompatibilityBlueprint(BaseModel):
         "str_strip_whitespace": True,
         "frozen": True,
     }
+
+
+class PersonDescription(BaseModel):
+    """Warm, third-person natural language profile generated after interview completion."""
+
+    description: str = Field(..., min_length=50, max_length=2000)
+
+    model_config = {
+        "str_strip_whitespace": True,
+        "frozen": True,
+    }

@@ -1,6 +1,8 @@
 version: '3.9'
 
 services:
+
+  # ── Postgres ──────────────────────────────────────────────────────────────
   db:
     image: postgres:16
     container_name: zfm_postgres
@@ -17,6 +19,34 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  # ── FastAPI core ──────────────────────────────────────────────────────────
+  backend-core:
+    build: ./backend-core
+    container_name: zfm_backend_core
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://zfm_user:zfm_secret@db:5432/zero_fraud_matrimony
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DEV_MODE: ${DEV_MODE:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Socket.io chat ────────────────────────────────────────────────────────
+  backend-chat:
+    build: ./backend-chat
+    container_name: zfm_backend_chat
+    ports:
+      - "3001:3001"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      FASTAPI_BASE: http://backend-core:8000
+    depends_on:
+      - backend-core
     restart: unless-stopped
 
 volumes:

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -13,6 +14,7 @@ import {
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 
+import { API_BASE } from '../services/api';
 import {
   type AppSocket,
   type ChatLockedPayload,
@@ -37,7 +39,7 @@ const AMBER  = '#F59E0B';
 
 const GALLERY_SWATCHES = ['#1B3A5C', '#2A4A6E', '#163352', '#223D62'] as const;
 
-const PHOTO_REVEAL_THRESHOLD = 5;
+const PHOTO_REVEAL_THRESHOLD = 15;
 const GALLERY_SIZE = 4;
 
 // ---------------------------------------------------------------------------
@@ -52,22 +54,46 @@ interface Message {
   messageCount: number;
 }
 
+export type ProfileConfidence = 'HIGH' | 'MEDIUM' | 'LOW' | null;
+
 export interface ChatScreenProps {
   currentUserId: string;
   currentUserStake: number;
   partnerUserId: string;
+  partnerConfidence?: ProfileConfidence;
+  photoRefreshKey?: number;
+  onEditProfile?: () => void;
 }
 
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function PrimaryVibePhoto(): React.JSX.Element {
+function PrimaryVibePhoto({ photoUrl, isBlurred }: { photoUrl?: string; isBlurred: boolean }): React.JSX.Element {
   return (
     <View style={photoStyles.container}>
       <View style={photoStyles.frame}>
-        <View style={photoStyles.avatarCircle} />
-        <View style={photoStyles.avatarBody} />
+        {photoUrl ? (
+          <>
+            <Image
+                source={{ uri: photoUrl }}
+                style={{ width: 108, height: 148, position: 'absolute', top: 0, left: 0 }}
+                resizeMode="cover"
+              />
+            {isBlurred && (
+              <BlurView intensity={90} tint="dark" style={StyleSheet.absoluteFillObject}>
+                <View style={photoStyles.lockCenter}>
+                  <Text style={photoStyles.lockIcon}>🔒</Text>
+                </View>
+              </BlurView>
+            )}
+          </>
+        ) : (
+          <>
+            <View style={photoStyles.avatarCircle} />
+            <View style={photoStyles.avatarBody} />
+          </>
+        )}
       </View>
       <View style={photoStyles.badge}>
         <Text style={photoStyles.badgeText}>Primary Vibe</Text>
@@ -106,6 +132,12 @@ const photoStyles = StyleSheet.create({
     borderTopRightRadius: 54,
     backgroundColor: GOLD + '25',
   },
+  lockCenter: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lockIcon: { fontSize: 26 },
   badge: {
     backgroundColor: GOLD,
     paddingHorizontal: 10,
@@ -125,19 +157,34 @@ const photoStyles = StyleSheet.create({
 interface LockedGalleryProps {
   blurAnims: Animated.Value[];
   isBlurred: boolean;
+  photoUrls: string[];
 }
 
-function LockedGallery({ blurAnims, isBlurred }: LockedGalleryProps): React.JSX.Element {
+function LockedGallery({ blurAnims, isBlurred, photoUrls }: LockedGalleryProps): React.JSX.Element {
+  // Show up to 4 slots; pad with nulls if fewer photos
+  const slots = Array.from({ length: GALLERY_SIZE }, (_, i) => photoUrls[i] ?? null);
+
   return (
     <View style={galleryStyles.root}>
       <Text style={galleryStyles.label}>
         {isBlurred ? 'Locked Gallery' : 'Gallery Unlocked'}
       </Text>
       <View style={galleryStyles.grid}>
-        {GALLERY_SWATCHES.map((swatch, i) => (
-          <View key={i} style={[galleryStyles.thumb, { backgroundColor: swatch }]}>
-            <View style={galleryStyles.thumbLine} />
-            <View style={[galleryStyles.thumbLine, galleryStyles.thumbLineMid]} />
+        {slots.map((url, i) => (
+          <View key={i} style={[galleryStyles.thumb, { backgroundColor: GALLERY_SWATCHES[i] }]}>
+            {url && (
+              <Image
+                source={{ uri: url }}
+                style={{ width: GALLERY_THUMB_SIZE, height: GALLERY_THUMB_SIZE, position: 'absolute', top: 0, left: 0 }}
+                resizeMode="cover"
+              />
+            )}
+            {!url && (
+              <>
+                <View style={galleryStyles.thumbLine} />
+                <View style={[galleryStyles.thumbLine, galleryStyles.thumbLineMid]} />
+              </>
+            )}
             <Animated.View
               style={[StyleSheet.absoluteFillObject, { opacity: blurAnims[i] }]}
               pointerEvents="none"
@@ -154,6 +201,8 @@ function LockedGallery({ blurAnims, isBlurred }: LockedGalleryProps): React.JSX.
   );
 }
 
+const GALLERY_THUMB_SIZE = 112;
+
 const galleryStyles = StyleSheet.create({
   root:  { flexShrink: 0, gap: 6 },
   label: {
@@ -165,8 +214,8 @@ const galleryStyles = StyleSheet.create({
   },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   thumb: {
-    flexBasis: '47%',
-    aspectRatio: 1,
+    width: GALLERY_THUMB_SIZE,
+    height: GALLERY_THUMB_SIZE,
     borderRadius: 10,
     overflow: 'hidden',
     justifyContent: 'flex-end',
@@ -190,6 +239,54 @@ const galleryStyles = StyleSheet.create({
 });
 
 // ---------------------------------------------------------------------------
+// ProfileConfidenceBadge — reusable, import this into the match feed too
+// ---------------------------------------------------------------------------
+
+interface ProfileConfidenceBadgeProps {
+  confidence: ProfileConfidence;
+}
+
+export function ProfileConfidenceBadge({ confidence }: ProfileConfidenceBadgeProps): React.JSX.Element | null {
+  if (!confidence || confidence === 'HIGH') return null;
+
+  const isLow = confidence === 'LOW';
+  return (
+    <View style={[badgeStyles.root, isLow ? badgeStyles.rootLow : badgeStyles.rootMedium]}>
+      <Text style={badgeStyles.icon}>{isLow ? '⚠' : 'ℹ'}</Text>
+      <Text style={[badgeStyles.text, isLow ? badgeStyles.textLow : badgeStyles.textMedium]}>
+        {isLow
+          ? 'Profile may not match stated values'
+          : 'Some details unverified'}
+      </Text>
+    </View>
+  );
+}
+
+const badgeStyles = StyleSheet.create({
+  root: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+  },
+  rootLow: {
+    backgroundColor: '#EF444415',
+    borderColor: '#EF444450',
+  },
+  rootMedium: {
+    backgroundColor: '#F59E0B15',
+    borderColor: '#F59E0B50',
+  },
+  icon: { fontSize: 12 },
+  text: { fontSize: 12, fontWeight: '600', flexShrink: 1 },
+  textLow:    { color: '#EF4444' },
+  textMedium: { color: '#F59E0B' },
+});
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -197,6 +294,9 @@ export default function ChatScreen({
   currentUserId,
   currentUserStake,
   partnerUserId,
+  partnerConfidence = null,
+  photoRefreshKey = 0,
+  onEditProfile,
 }: ChatScreenProps): React.JSX.Element {
   const [messages, setMessages]         = useState<Message[]>([]);
   const [inputText, setInputText]       = useState('');
@@ -206,6 +306,8 @@ export default function ChatScreen({
   const [systemBlock, setSystemBlock]   = useState(false);
   const [isCooldown, setIsCooldown]     = useState(false);
   const [warning, setWarning]           = useState<string | null>(null);
+  const [isProfileExpanded, setProfileExpanded] = useState(false);
+  const [partnerPhotos, setPartnerPhotos] = useState<string[]>([]);
 
   const socketRef = useRef<AppSocket | null>(null);
   const listRef   = useRef<FlatList<Message>>(null);
@@ -232,21 +334,44 @@ export default function ChatScreen({
     });
 
     socket.on('receiveMessage', (msg: ServerMessage) => {
-      setMessages(prev => [
-        ...prev,
-        {
-          id: `${msg.timestamp}-${msg.fromUserId}`,
-          fromUserId: msg.fromUserId,
-          content: msg.content,
-          timestamp: msg.timestamp,
-          messageCount: msg.messageCount,
-        },
-      ]);
+      // Only handle messages from the OTHER user here
+      if (msg.fromUserId === currentUserId) return;
+      const incomingMsg: Message = {
+        id: `${msg.timestamp}-${msg.fromUserId}`,
+        fromUserId: msg.fromUserId,
+        content: msg.content,
+        timestamp: msg.timestamp,
+        messageCount: msg.messageCount,
+      };
+      setMessages(prev => [...prev, incomingMsg]);
+      setCount(msg.messageCount);
+    });
+
+    // Confirmation from server for our own sent messages — replaces optimistic
+    (socket as any).on('messageSent', (msg: ServerMessage) => {
+      const confirmedMsg: Message = {
+        id: `${msg.timestamp}-${msg.fromUserId}`,
+        fromUserId: msg.fromUserId,
+        content: msg.content,
+        timestamp: msg.timestamp,
+        messageCount: msg.messageCount,
+      };
+      setMessages(prev => {
+        const lastOptIdx = prev.reduceRight(
+          (found, m, i) => found === -1 && m.id.startsWith('opt-') ? i : found,
+          -1,
+        );
+        if (lastOptIdx === -1) return prev; // already confirmed, ignore
+        const next = [...prev];
+        next[lastOptIdx] = confirmedMsg;
+        return next;
+      });
       setCount(msg.messageCount);
     });
 
     socket.on('frosted_glass_unlocked', (_payload: FrostedGlassUnlockedPayload) => {
       setIsBlurred(false);
+      setCount(PHOTO_REVEAL_THRESHOLD); // ensure progress bar shows 5/5 at unlock
       Animated.stagger(
         150,
         blurAnims.map(anim =>
@@ -287,6 +412,66 @@ export default function ChatScreen({
     };
   }, [currentUserId, currentUserStake, blurAnims]);
 
+  // ── Load persisted messages from backend on mount ───────────────────────
+  useEffect(() => {
+    fetch(`${API_BASE}/messages/${currentUserId}/${partnerUserId}`)
+      .then(res => (res.ok ? res.json() : []))
+      .then((data: Array<{
+        id: number;
+        sender_id: string;
+        receiver_id: string;
+        content: string;
+        timestamp: string;
+        is_read: boolean;
+      }>) => {
+        const loaded: Message[] = data.map(m => ({
+          id: String(m.id),
+          fromUserId: m.sender_id,
+          content: m.content,
+          timestamp: new Date(m.timestamp).getTime(),
+          messageCount: 0,
+        }));
+        const loadedIds = new Set(loaded.map(m => m.id));
+        // Merge with any socket messages that arrived before the fetch returned
+        setMessages(prev => [
+          ...loaded,
+          ...prev.filter(m => !loadedIds.has(m.id)),
+        ]);
+      })
+      .catch(() => { /* silent — start with empty state */ });
+  }, [currentUserId, partnerUserId]);
+
+  // ── Fetch persisted relationship state on mount ─────────────────────────
+  useEffect(() => {
+    fetch(`${API_BASE}/relationships/${currentUserId}/${partnerUserId}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: { message_count: number; photo_unlocked: boolean } | null) => {
+        if (!data) return;
+        setCount(data.message_count);
+        if (data.photo_unlocked) {
+          setIsBlurred(false);
+          blurAnims.forEach(anim => anim.setValue(0));
+        }
+      })
+      .catch(() => { /* silent — stays blurred until messages are sent */ });
+  }, [currentUserId, partnerUserId, blurAnims]);
+
+  // ── Fetch partner photos (re-runs when photoRefreshKey changes) ────────
+  useEffect(() => {
+    const dbId = partnerUserId.replace(/^(lead-|user-)/, '');
+    fetch(`${API_BASE}/photos/${dbId}`)
+      .then(res => (res.ok ? res.json() : []))
+      .then((data: Array<{ url: string; is_primary: boolean; sort_order: number }>) => {
+        const sorted = [...data].sort((a, b) => {
+          if (a.is_primary && !b.is_primary) return -1;
+          if (!a.is_primary && b.is_primary) return 1;
+          return a.sort_order - b.sort_order;
+        });
+        setPartnerPhotos(sorted.map(p => p.url));
+      })
+      .catch(() => {});
+  }, [partnerUserId, photoRefreshKey]);
+
   // ── Auto-scroll ─────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -300,10 +485,40 @@ export default function ChatScreen({
   const handleSend = useCallback(() => {
     const text = inputText.trim();
     if (!text || !socketRef.current || isInputBlocked) return;
+
+    // Optimistic insert — shows the message immediately before server echo
+    const now = Date.now();
+    setMessages(prev => [
+      ...prev,
+      { id: `opt-${now}`, fromUserId: currentUserId, content: text, timestamp: now, messageCount: 0 },
+    ]);
+    setCount(prev => prev + 1);
+
     socketRef.current.emit('sendMessage', { toUserId: partnerUserId, content: text });
     setInputText('');
     inputRef.current?.focus();
-  }, [inputText, partnerUserId, isInputBlocked]);
+
+    // Persist message to database so it survives navigation
+    // Chat server persists the message — no need to call POST /messages here
+
+    // Persist message count and drive photo unlock from backend
+    fetch(`${API_BASE}/relationships/${currentUserId}/${partnerUserId}/increment`, { method: 'PATCH' })
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: { message_count: number; photo_unlocked: boolean } | null) => {
+        if (!data) return;
+        setCount(data.message_count);
+        if (data.photo_unlocked) {
+          setIsBlurred(false);
+          Animated.stagger(
+            150,
+            blurAnims.map(anim =>
+              Animated.timing(anim, { toValue: 0, duration: 700, useNativeDriver: Platform.OS !== 'web' }),
+            ),
+          ).start();
+        }
+      })
+      .catch(() => { /* silent — optimistic local count still updated above */ });
+  }, [inputText, partnerUserId, isInputBlocked, currentUserId, blurAnims]);
 
   // ── Message renderer ─────────────────────────────────────────────────────
 
@@ -357,56 +572,76 @@ export default function ChatScreen({
           </View>
         )}
 
-        {/* ── Gallery section (flexShrink: 0 prevents vertical expansion) ── */}
+        {/* ── Header + collapsible profile panel ─────────────────────────── */}
         <View style={{ flexShrink: 0 }}>
-          {/* ── Status bar ─────────────────────────────────────────────── */}
-          <View style={styles.statusBar}>
+          {/* ── Tappable status bar — tap to expand/collapse profile ─────── */}
+          <Pressable
+            onPress={() => setProfileExpanded(v => !v)}
+            style={styles.statusBar}
+          >
             <View style={styles.statusLeft}>
               <View style={[styles.dot, { backgroundColor: isConnected ? '#22C55E' : SLATE }]} />
               <Text style={styles.statusName} numberOfLines={1}>{partnerUserId}</Text>
             </View>
-            <Text style={styles.statusHint}>
-              {isBlurred ? 'Gallery locked' : 'Gallery unlocked ✨'}
-            </Text>
-          </View>
-
-          {/* ── Match Profile header ──────────────────────────────────── */}
-          <View style={styles.profileCard}>
-            <Text style={styles.profileCardTitle}>Match Profile</Text>
-            <View style={styles.profileRow}>
-              <PrimaryVibePhoto />
-              <LockedGallery blurAnims={blurAnims} isBlurred={isBlurred} />
-            </View>
-
-            {isBlurred ? (
-              <View style={styles.progressWrapper}>
-                <View style={styles.progressHeader}>
-                  <Text style={styles.progressLabel}>
-                    Gallery unlocks after {PHOTO_REVEAL_THRESHOLD} messages
-                  </Text>
-                  <Text style={styles.progressCount}>
-                    {messageCount}/{PHOTO_REVEAL_THRESHOLD}
-                  </Text>
-                </View>
-                <View style={styles.progressTrack}>
-                  <View
-                    style={[
-                      styles.progressFill,
-                      { width: `${progressPct * 100}%` as `${number}%` },
-                    ]}
-                  />
-                </View>
-              </View>
-            ) : (
-              <View style={styles.unlockedBanner}>
-                <Text style={styles.unlockedText}>
-                  ✨ Photos revealed — trust established
-                </Text>
-              </View>
+            {onEditProfile && (
+              <Pressable
+                onPress={onEditProfile}
+                hitSlop={10}
+                style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, borderWidth: 1, borderColor: '#C9A84C40' }}
+              >
+                <Text style={{ color: '#C9A84C', fontSize: 11, fontWeight: '700' }}>Edit Profile</Text>
+              </Pressable>
             )}
-          </View>
+            <View style={styles.statusRight}>
+              <Text style={styles.statusHint}>
+                {isBlurred
+                  ? `${Math.min(messageCount, PHOTO_REVEAL_THRESHOLD)}/${PHOTO_REVEAL_THRESHOLD} 🔒`
+                  : '✨ Unlocked'}
+              </Text>
+              <Text style={styles.chevron}>{isProfileExpanded ? '▲' : '▼'}</Text>
+            </View>
+          </Pressable>
 
-          {/* ── Divider ──────────────────────────────────────────────── */}
+          {/* ── Collapsible profile card ──────────────────────────────────── */}
+          {isProfileExpanded && (
+            <View style={styles.profileCard}>
+              <Text style={styles.profileCardTitle}>Match Profile</Text>
+              <View style={styles.profileRow}>
+                <PrimaryVibePhoto photoUrl={partnerPhotos[0]} isBlurred={isBlurred} />
+                <LockedGallery blurAnims={blurAnims} isBlurred={isBlurred} photoUrls={partnerPhotos} />
+              </View>
+              <ProfileConfidenceBadge confidence={partnerConfidence} />
+
+              {isBlurred ? (
+                <View style={styles.progressWrapper}>
+                  <View style={styles.progressHeader}>
+                    <Text style={styles.progressLabel}>
+                      Gallery unlocks after {PHOTO_REVEAL_THRESHOLD} messages
+                    </Text>
+                    <Text style={styles.progressCount}>
+                      {messageCount}/{PHOTO_REVEAL_THRESHOLD}
+                    </Text>
+                  </View>
+                  <View style={styles.progressTrack}>
+                    <View
+                      style={[
+                        styles.progressFill,
+                        { width: `${progressPct * 100}%` as `${number}%` },
+                      ]}
+                    />
+                  </View>
+                </View>
+              ) : (
+                <View style={styles.unlockedBanner}>
+                  <Text style={styles.unlockedText}>
+                    ✨ Photos revealed — trust established
+                  </Text>
+                </View>
+              )}
+            </View>
+          )}
+
+          {/* ── Divider ──────────────────────────────────────────────────── */}
           <View style={styles.divider} />
         </View>
 
@@ -487,6 +722,8 @@ const styles = StyleSheet.create({
   dot:        { width: 8, height: 8, borderRadius: 4 },
   statusName: { color: WHITE, fontSize: 16, fontWeight: '600', flex: 1 },
   statusHint: { color: SLATE, fontSize: 12 },
+  statusRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  chevron: { color: SLATE, fontSize: 10 },
 
   // Match Profile card
   profileCard: {

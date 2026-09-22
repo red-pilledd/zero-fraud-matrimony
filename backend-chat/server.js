@@ -12,14 +12,16 @@ const Anthropic = require('@anthropic-ai/sdk');
 // Constants
 // ---------------------------------------------------------------------------
 
-const PORT = 3001;
-const PHOTO_REVEAL_THRESHOLD  = 5;                      // frosted_glass_unlocked
-const COOLDOWN_THRESHOLD      = 10;                     // 5-hour cooldown activates
-const COOLDOWN_DURATION_MS    = 5 * 60 * 60 * 1000;    // 5 hours in ms
+const PORT                    = 3001;
+const PHOTO_REVEAL_THRESHOLD  = 5;
+const COOLDOWN_THRESHOLD      = 100;  // set high for testing (was 10)
+const MESSAGES_PER_WINDOW     = 5;    // messages allowed per 5-hour window after first cooldown
+const COOLDOWN_DURATION_MS    = 5 * 60 * 60 * 1000;
 const MINIMUM_STAKE_TO_INITIATE = 1;
+const FASTAPI_BASE            = process.env.FASTAPI_BASE ?? 'http://localhost:8000';
 
 // ---------------------------------------------------------------------------
-// Anthropic client (null when ANTHROPIC_API_KEY is absent — skips AI check)
+// Anthropic client
 // ---------------------------------------------------------------------------
 
 const anthropicClient = process.env.ANTHROPIC_API_KEY
@@ -41,27 +43,41 @@ const io = new Server(server, {
 });
 
 // ---------------------------------------------------------------------------
-// In-memory state
-// NOTE: Replace all stores with Redis before horizontal scaling.
+// In-memory state  (replace with Redis before horizontal scaling)
 // ---------------------------------------------------------------------------
 
-/** userId → active socketId. @type {Map<string, string>} */
+/** userId → active socketId */
 const userSockets = new Map();
 
-/** conversationKey → total messages delivered (drives both thresholds). @type {Map<string, number>} */
+/** conversationKey → total messages ever delivered */
 const messageCounts = new Map();
 
-/** conversationKey → true once verifyPayment succeeds. @type {Map<string, boolean>} */
+/** conversationKey → true once verifyPayment succeeds */
 const paymentVerifiedSessions = new Map();
 
-/** conversationKey → true when AI sentinel trips the hard paywall. @type {Map<string, boolean>} */
+/** conversationKey → true when AI sentinel triggers a hard lock */
 const chatLockedSessions = new Map();
 
-/** conversationKey → epoch ms when the 5-hour cooldown began. @type {Map<string, number>} */
+/** conversationKey → epoch ms when a cooldown period started */
 const cooldownSessions = new Map();
 
+/**
+ * conversationKey → array of last BUFFER_SIZE messages { userId, content }
+ * Used by the background consistency checker.
+ */
+const messageBuffers = new Map();
+const BUFFER_SIZE = 20;
+const ANALYSIS_MILESTONES = new Set([10, 20, 30, 40, 50]);
+
+/**
+ * conversationKey → { windowStart: number, windowCount: number }
+ * Tracks the rolling 5-message window that opens after the first cooldown.
+ */
+const windowSessions = new Map();
+
+
 // ---------------------------------------------------------------------------
-// AI Sentinel — PII + physical address / location detection
+// AI Sentinel — PII, location, money/pressure detection
 // ---------------------------------------------------------------------------
 
 const PII_PATTERNS = [
@@ -79,22 +95,21 @@ function hasPiiRegex(content) {
 }
 
 const SENTINEL_SYSTEM_PROMPT =
-  'You are a strict safety and PII detection engine. Analyze the text for: ' +
-  '(1) any obfuscated phone numbers, emails, or social media handles ' +
-  '(e.g., spelled-out numbers, spaced-out digits, missing @ symbols, letter-number replacements); ' +
-  '(2) physical addresses or location meeting points ' +
-  '(e.g., street addresses, landmarks, neighbourhoods, GPS coordinates, ' +
-  'or any suggestion to meet at a specific physical place). ' +
-  'Respond ONLY with the single word SAFE or VIOLATION. No punctuation, no explanation.';
+  'You are a strict safety monitor for a matrimony chat platform. ' +
+  'Analyze the message and respond with ONLY one of these three words:\n' +
+  'VIOLATION — phone numbers, emails, social media handles, physical addresses, ' +
+  'landmarks, GPS coordinates, or any obfuscated version of these.\n' +
+  'SUSPICION — requests for money, recharges, loans, gifts, financial help, ' +
+  'or pressure/manipulation tactics (ultimatums, guilt-tripping, forcing a call or meeting).\n' +
+  'SAFE — none of the above.\n' +
+  'One word only. No punctuation. No explanation.';
 
 /**
- * Semantic bypass-detection via claude-3-haiku-20240307.
- * Fail-open: returns false on API error or malformed JSON so real messages
- * are never silently dropped due to an outage.
- * @param {string} content @returns {Promise<boolean>}
+ * @param {string} content
+ * @returns {Promise<'VIOLATION'|'SUSPICION'|'SAFE'>}
  */
-async function hasPiiSemantic(content) {
-  if (!anthropicClient) return false;
+async function sentinelAI(content) {
+  if (!anthropicClient) return 'SAFE';
   try {
     const response = await anthropicClient.messages.create({
       model: 'claude-3-haiku-20240307',
@@ -103,19 +118,69 @@ async function hasPiiSemantic(content) {
       messages: [{ role: 'user', content }],
     });
     const raw = response.content[0]?.text?.trim() ?? '';
-    return raw === 'VIOLATION';
+    if (raw === 'VIOLATION') return 'VIOLATION';
+    if (raw === 'SUSPICION') return 'SUSPICION';
+    return 'SAFE';
   } catch {
-    return false;
+    return 'SAFE'; // fail-open: never drop a real message due to API outage
   }
 }
 
 /**
- * Two-stage detection: regex short-circuits before the AI call.
- * @param {string} content @returns {Promise<boolean>}
+ * Two-stage detection: regex short-circuits for obvious PII before the AI call.
+ * @param {string} content
+ * @returns {Promise<'VIOLATION'|'SUSPICION'|'SAFE'>}
  */
-async function detectViolation(content) {
-  if (hasPiiRegex(content)) return true;
-  return hasPiiSemantic(content);
+async function detectContent(content) {
+  if (hasPiiRegex(content)) return 'VIOLATION';
+  return sentinelAI(content);
+}
+
+// ---------------------------------------------------------------------------
+// FastAPI callbacks — fire-and-forget, never block message delivery
+// ---------------------------------------------------------------------------
+
+/** Permanent ban for PII/address sharing — no threshold, no appeal. */
+async function submitInstantBan(userId) {
+  try {
+    await fetch(`${FASTAPI_BASE}/internal/instant-ban`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, reason: 'PII_VIOLATION' }),
+    });
+  } catch { /* ignore */ }
+}
+
+/** Trigger passive profile consistency analysis at message milestones. */
+async function triggerConsistencyCheck(userIdA, userIdB, messages) {
+  try {
+    await fetch(`${FASTAPI_BASE}/internal/analyze-consistency`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id_a: userIdA, user_id_b: userIdB, messages }),
+    });
+  } catch { /* fire-and-forget */ }
+}
+
+// ---------------------------------------------------------------------------
+// Cooldown helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Emit cooldown_activated to both sides of a conversation.
+ * @param {string} key @param {string} recipientSocketId|null
+ */
+function emitCooldown(key, senderSocket, recipientSocketId) {
+  const activatedAt = Date.now();
+  cooldownSessions.set(key, activatedAt);
+  const payload = {
+    conversationKey: key,
+    activatedAt,
+    expiresAt: activatedAt + COOLDOWN_DURATION_MS,
+  };
+  senderSocket.emit('cooldown_activated', payload);
+  if (recipientSocketId) io.to(recipientSocketId).emit('cooldown_activated', payload);
+  console.log(`[cooldown_activated]  key=${key}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +193,7 @@ function conversationKey(a, b) {
 }
 
 // ---------------------------------------------------------------------------
-// Stake System middleware
+// Stake middleware
 // ---------------------------------------------------------------------------
 
 io.use((socket, next) => {
@@ -162,22 +227,24 @@ io.on('connection', (socket) => {
   //
   // Gate order:
   //   1. Payload validation
-  //   2. Hard paywall (chatLockedSessions) — set by AI sentinel on violation
-  //   3. Cooldown gate (cooldownSessions)  — set at COOLDOWN_THRESHOLD messages
-  //   4. AI Sentinel — detects PII + addresses on every message
-  //      → violation + !paymentVerified → lock chat for both users
-  //   5. Deliver message + increment count
+  //   2. Hard paywall (sentinel-triggered permanent lock)
+  //   3. Cooldown / rolling window gate (skipped if payment verified)
+  //   4. AI Sentinel — VIOLATION | SUSPICION | SAFE
+  //      VIOLATION + !paid → lock chat, payment unlocks it
+  //      SUSPICION → instant permanent ban, no appeal
+  //   5. Deliver message + increment total count
   //   6. Threshold side-effects:
-  //      count === PHOTO_REVEAL_THRESHOLD  → frosted_glass_unlocked
-  //      count === COOLDOWN_THRESHOLD      → cooldown_activated
+  //        totalCount === PHOTO_REVEAL_THRESHOLD → frosted_glass_unlocked
+  //        totalCount === COOLDOWN_THRESHOLD     → first cooldown (if not paid)
+  //        window fills (windowCount === MESSAGES_PER_WINDOW) → next cooldown
   // -------------------------------------------------------------------------
+
   socket.on('sendMessage', async ({ toUserId, content }) => {
     try {
       if (!toUserId || typeof toUserId !== 'string' || !content || typeof content !== 'string') {
         socket.emit('error', { code: 'INVALID_PAYLOAD', message: 'toUserId and content are required strings.' });
         return;
       }
-
       if (toUserId === userId) {
         socket.emit('error', { code: 'CANNOT_MESSAGE_SELF' });
         return;
@@ -185,40 +252,58 @@ io.on('connection', (socket) => {
 
       const key = conversationKey(userId, toUserId);
       const recipientSocketId = userSockets.get(toUserId);
+      const isPaid = paymentVerifiedSessions.get(key) === true;
 
-      // ── Gate 1: Hard paywall ────────────────────────────────────────────
+      // ── Gate 1: Hard paywall ──────────────────────────────────────────────
       if (chatLockedSessions.get(key)) {
         socket.emit('system_warning', {
           code: 'CHAT_LOCKED',
-          message: 'Safety/Premium violation detected',
+          message: 'Safety/Premium violation detected. Payment required to unlock.',
         });
         return;
       }
 
-      // ── Gate 2: Cooldown ────────────────────────────────────────────────
-      const cooldownStart = cooldownSessions.get(key);
-      if (cooldownStart !== undefined) {
-        const expiresAt = cooldownStart + COOLDOWN_DURATION_MS;
-        if (Date.now() < expiresAt) {
-          socket.emit('system_warning', {
-            code: 'COOLDOWN_ACTIVE',
-            message: 'Cooldown active',
-          });
-          return;
+      // ── Gate 2: Cooldown / rolling window (skipped for paid) ──────────────
+      if (!isPaid) {
+        const cooldownStart = cooldownSessions.get(key);
+        if (cooldownStart !== undefined) {
+          const expiresAt = cooldownStart + COOLDOWN_DURATION_MS;
+          if (Date.now() < expiresAt) {
+            socket.emit('system_warning', {
+              code: 'COOLDOWN_ACTIVE',
+              message: 'Message limit reached. Upgrade to Premium to chat instantly, or wait 5 hours.',
+              expiresAt,
+            });
+            return;
+          }
+          // Cooldown expired — clear it so the next window can begin
+          cooldownSessions.delete(key);
         }
-        // Cooldown has expired — clear it and allow the message
-        cooldownSessions.delete(key);
       }
 
-      // ── Gate 3: AI Sentinel ─────────────────────────────────────────────
-      const violationDetected = await detectViolation(content);
-      if (violationDetected && !paymentVerifiedSessions.get(key)) {
-        socket.emit('SYSTEM_BLOCK', { reason: 'VIOLATION' });
+      // ── Gate 3: AI Sentinel ───────────────────────────────────────────────
+      const sentinelResult = await detectContent(content);
+
+      if (sentinelResult === 'VIOLATION' && !isPaid) {
+        // Lock chat until payment — no ban, user can unlock by paying
+        chatLockedSessions.set(key, true);
+        const blockPayload = { reason: 'Safety/Premium violation detected. Payment required to unlock.' };
+        socket.emit('SYSTEM_BLOCK', blockPayload);
+        if (recipientSocketId) io.to(recipientSocketId).emit('SYSTEM_BLOCK', blockPayload);
         console.log(`[SYSTEM_BLOCK]  key=${key}  triggeredBy=${userId}`);
         return;
       }
 
-      // ── Deliver message ─────────────────────────────────────────────────
+      if (sentinelResult === 'SUSPICION') {
+        // Money requests / pressure tactics — instant permanent ban, no appeal
+        await submitInstantBan(userId);
+        socket.emit('SYSTEM_BLOCK', { reason: 'Your account has been permanently banned for violating community guidelines.' });
+        if (recipientSocketId) io.to(recipientSocketId).emit('SYSTEM_BLOCK', { reason: 'This conversation has been locked due to a safety violation.' });
+        console.log(`[INSTANT_BAN]  key=${key}  bannedUserId=${userId}  reason=MONEY_OR_PRESSURE`);
+        return;
+      }
+
+      // ── Deliver message ───────────────────────────────────────────────────
       const newCount = (messageCounts.get(key) ?? 0) + 1;
       messageCounts.set(key, newCount);
 
@@ -230,36 +315,66 @@ io.on('connection', (socket) => {
         timestamp: Date.now(),
       };
 
-      if (recipientSocketId) {
-        io.to(recipientSocketId).emit('receiveMessage', messagePayload);
-      }
-      socket.emit('receiveMessage', messagePayload);
+      if (recipientSocketId) io.to(recipientSocketId).emit('receiveMessage', messagePayload);
+      // Confirm to sender with the final messageCount (replaces optimistic message)
+      socket.emit('messageSent', messagePayload);
 
-      // ── Threshold: photo reveal ─────────────────────────────────────────
+      // ── Persist to FastAPI (fire-and-forget, non-blocking) ────────────────
+      fetch(`${FASTAPI_BASE}/messages/${userId}/${toUserId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      }).catch(() => { /* ignore — real-time delivery already succeeded */ });
+
+      // ── Update message buffer (for consistency analysis) ─────────────────
+      const buf = messageBuffers.get(key) ?? [];
+      buf.push({ userId, content });
+      if (buf.length > BUFFER_SIZE) buf.shift();
+      messageBuffers.set(key, buf);
+
+      // ── Milestone: trigger passive profile consistency check ──────────────
+      if (ANALYSIS_MILESTONES.has(newCount)) {
+        triggerConsistencyCheck(userId, toUserId, buf);
+      }
+
+      // ── Threshold: photo reveal ───────────────────────────────────────────
       if (newCount === PHOTO_REVEAL_THRESHOLD) {
         const unlockPayload = { conversationKey: key, unlockedAt: Date.now() };
         socket.emit('frosted_glass_unlocked', unlockPayload);
-        if (recipientSocketId) {
-          io.to(recipientSocketId).emit('frosted_glass_unlocked', unlockPayload);
-        }
+        if (recipientSocketId) io.to(recipientSocketId).emit('frosted_glass_unlocked', unlockPayload);
         console.log(`[frosted_glass_unlocked]  key=${key}`);
+
+        // Persist unlock to DB for both directions so it survives navigation/refresh
+        fetch(`${FASTAPI_BASE}/relationships/${userId}/${toUserId}/unlock`, { method: 'PATCH' }).catch(() => {});
+        fetch(`${FASTAPI_BASE}/relationships/${toUserId}/${userId}/unlock`, { method: 'PATCH' }).catch(() => {});
       }
 
-      // ── Threshold: cooldown ─────────────────────────────────────────────
-      if (newCount === COOLDOWN_THRESHOLD) {
-        const activatedAt = Date.now();
-        cooldownSessions.set(key, activatedAt);
-        const cooldownPayload = {
-          conversationKey: key,
-          activatedAt,
-          expiresAt: activatedAt + COOLDOWN_DURATION_MS,
-        };
-        socket.emit('cooldown_activated', cooldownPayload);
-        if (recipientSocketId) {
-          io.to(recipientSocketId).emit('cooldown_activated', cooldownPayload);
+      // ── Threshold: first cooldown + rolling window management ─────────────
+      if (!isPaid) {
+        if (newCount === COOLDOWN_THRESHOLD) {
+          // First hard stop — no window yet, just fire the cooldown
+          emitCooldown(key, socket, recipientSocketId);
+
+        } else if (newCount > COOLDOWN_THRESHOLD) {
+          // We're in rolling-window territory
+          let win = windowSessions.get(key);
+
+          if (!win) {
+            // First message after a cooldown expired — open a fresh window
+            win = { windowStart: Date.now(), windowCount: 0 };
+            windowSessions.set(key, win);
+          }
+
+          win.windowCount += 1;
+
+          if (win.windowCount >= MESSAGES_PER_WINDOW) {
+            // Window just filled — trigger the next cooldown and reset window
+            windowSessions.delete(key);
+            emitCooldown(key, socket, recipientSocketId);
+          }
         }
-        console.log(`[cooldown_activated]  key=${key}`);
       }
+
     } catch (err) {
       console.error(`[sendMessage] unhandled error userId=${userId}:`, err);
       socket.emit('error', { code: 'SERVER_ERROR', message: 'An internal error occurred.' });
@@ -267,9 +382,7 @@ io.on('connection', (socket) => {
   });
 
   // -------------------------------------------------------------------------
-  // verifyPayment — clears both the hard lock and the cooldown, then sets the
-  // payment-verified flag so PII is permitted going forward.
-  // Payload: { toUserId: string, paymentToken: string }
+  // verifyPayment — clears lock, cooldown, and window; sets paid flag
   // -------------------------------------------------------------------------
   socket.on('verifyPayment', ({ toUserId }) => {
     if (!toUserId || typeof toUserId !== 'string') {
@@ -280,15 +393,14 @@ io.on('connection', (socket) => {
     const key = conversationKey(userId, toUserId);
     chatLockedSessions.delete(key);
     cooldownSessions.delete(key);
+    windowSessions.delete(key);
     paymentVerifiedSessions.set(key, true);
 
     const payload = { conversationKey: key, verifiedAt: Date.now() };
     socket.emit('payment_verified', payload);
 
     const recipientSocketId = userSockets.get(toUserId);
-    if (recipientSocketId) {
-      io.to(recipientSocketId).emit('payment_verified', payload);
-    }
+    if (recipientSocketId) io.to(recipientSocketId).emit('payment_verified', payload);
 
     console.log(`[verifyPayment]  key=${key}  userId=${userId}`);
   });
@@ -297,9 +409,7 @@ io.on('connection', (socket) => {
   // Disconnect
   // -------------------------------------------------------------------------
   socket.on('disconnect', (reason) => {
-    if (userSockets.get(userId) === socket.id) {
-      userSockets.delete(userId);
-    }
+    if (userSockets.get(userId) === socket.id) userSockets.delete(userId);
     console.log(`[disconnect] userId=${userId}  reason=${reason}`);
   });
 });
@@ -313,12 +423,29 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     service: 'backend-chat',
     port: PORT,
-    thresholds: { photoReveal: PHOTO_REVEAL_THRESHOLD, cooldown: COOLDOWN_THRESHOLD },
+    thresholds: {
+      photoReveal: PHOTO_REVEAL_THRESHOLD,
+      cooldown: COOLDOWN_THRESHOLD,
+      messagesPerWindow: MESSAGES_PER_WINDOW,
+    },
   });
 });
 
 // ---------------------------------------------------------------------------
-// Start (only when run directly; not when required by tests)
+// REST: internal — message count query (used by FastAPI flagging endpoint)
+// ---------------------------------------------------------------------------
+
+app.get('/internal/message-count', (req, res) => {
+  const { userA, userB } = req.query;
+  if (!userA || !userB) {
+    return res.status(400).json({ error: 'userA and userB query params are required.' });
+  }
+  const key = conversationKey(String(userA), String(userB));
+  res.json({ count: messageCounts.get(key) ?? 0 });
+});
+
+// ---------------------------------------------------------------------------
+// Start
 // ---------------------------------------------------------------------------
 
 if (require.main === module) {
