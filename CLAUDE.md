@@ -1,214 +1,74 @@
-# PROJECT: ZERO-FRAUD MATRIMONY
+# Thuna — AI-chaperoned matrimony & relationships (rebuilt 2026-10-04)
 
-## CORE ARCHITECTURE & STACK
+Public brand: **Thuna** (Malayalam തുണ, "companion"), set by `NEXT_PUBLIC_BRAND_NAME`. Matrimony-branded on the outside;
+dating sections exist but are invisible to parents (see Pools). The May-2026 Python/Node/Expo prototype is in `legacy/`
+— reference only, do not build on it.
 
-| Service | Stack | Port | Location |
-|---|---|---|---|
-| backend-core | FastAPI (Python) + SQLAlchemy + Pydantic | 8000 | `/backend-core` |
-| backend-chat | Node.js + Socket.io | 3001 | `/backend-chat` |
-| mobile-app | React Native (Expo) + TypeScript + Expo Router | 8081 | `/mobile-app` |
+## Run it (Windows)
+- DB: private Postgres 16 cluster in `web/.pgdata`, port **5458**. Start: `web/scripts/start-db.ps1` (detached; safe if running).
+  Never start pg_ctl from a Bash background task — the task timeout kills Postgres with it (happened 2026-10-04).
+- App: `npm run dev` in `web/` → **:3840** (launch.json entry `thuna`). Migrations: `npm run db:migrate` (db/NNN_*.sql).
+- Admin panel: `/admin`, password in `web/admin-password.txt` (local only, gitignored). Hash lives in `.env.local` as
+  `ADMIN_PASSWORD_HASH_B64` — base64 because a raw bcrypt hash's `$` signs get mangled by .env expansion.
+- Tests: `node scripts/test-rules.ts` (free rule layer), `node --conditions=react-server --env-file=.env.local scripts/test-screen.ts`
+  (25 tricky Manglish/Malayalam messages through the live AI, costs ~₹3). Must stay 25/25.
 
-**DB:** SQLite in dev (`matrimony.db`), PostgreSQL in prod. ORM: SQLAlchemy async.
+## Stack
+Next.js 16 (App Router) + TypeScript + raw SQL via `pg` + zod. Same pattern as construct-erp. One Node process does
+everything: pages, JSON API routes (`app/api/**`), live updates over SSE (`/api/stream`, in-process bus — single instance
+only), background jobs every 30 s from `instrumentation.ts` → `lib/jobs.ts`. Photos on local disk `web/uploads/`
+(`UPLOAD_DIR`), always served through `/api/photo/[id]` with an access check, never statically.
 
----
+## Pools — the hidden routing (lib/domain/onboarding.ts routeIntent)
+- Profile created by PARENT/SIBLING/RELATIVE/FRIEND → always MARRIAGE; dating options are never shown to them.
+- SELF → "Marriage" or "Something else" → purpose: dating-to-marry (→ MARRIAGE pool), LONG_TERM, CASUAL.
+- Members only ever see/search/message their own pool (discover.ts, checkCanRequest, photoAccess). Marriage pool is
+  opposite-gender only; legal age 21 men / 18 women. Other pools 18+ with a "seeking" choice.
+- The character read can flag INTENT_MISMATCH → admin queue → one-click "Move to X" (admin.ts reroute).
 
-## STRICT DIRECTIVES (NEVER DEVIATE)
+## Money
+One fee opens one conversation with one person (price per pool in admin Settings, default ₹99). Recipient accepts or
+declines. Decline / no reply within `reply_window_hours` (48) → fee back as **credit** automatically (jobs.ts
+expireRequests). Credit is spent first next time. One conversation per pair ever (no re-buy harassment loop).
+Gateway: Razorpay (`RAZORPAY_KEY_ID/SECRET/WEBHOOK_SECRET`); without keys and outside production a TEST gateway is used.
 
-1. **Zero-Fraud:** NEVER store raw government IDs. SHA-256 hash only (`identity_hash` column, 64-char hex).
-2. **Intent Silos:** `MATRIMONY` and `ALTERNATIVE` users are fully isolated at DB layer — never cross-query.
-3. **Stake System:** Contact requires tokens/micropayments.
-4. **No Swiping UI:** Frosted Glass mechanic only. Photos blurred until 15-message threshold (`photo_unlocked` flag in `user_relationships`).
-5. **Aesthetic:** Navy, Slate, Gold. Data-Driven Elegance.
-6. **AI Arbitrator:** Onboarding via AI interview, not static bios. All AI output validated against Pydantic schemas.
+## Message screening (lib/domain/messages.ts)
+send → PENDING → free rules (lib/moderation/rules.ts: digits in any script/words/split across messages, email, UPI,
+links, @handles) → AI (lib/ai/screen.ts, Haiku) → DELIVERED or BLOCKED. Recipient only ever reads DELIVERED. AI down →
+stays PENDING, job retries; never delivered unscreened. AI sees only DELIVERED history and judges only the new message
+(a bug where it re-punished an earlier blocked message was fixed 2026-10-04).
+Consequences are plain code (lib/domain/moderation.ts): sharing details HIGH → strike; asking for a number → blocked, no
+strike; 2 strikes → 7-day pause; 3 → ban. SCAM/SOLICITATION/THREAT HIGH → instant ban + people who paid to talk to them
+refunded. MINOR → ban + review. SELF_HARM → delivered + Tele-MANAS 14416 note + admin review.
 
----
+## Contact exchange
+Both must agree → floors (30 msgs, 10 each, 24 h — admin Settings) → AI review of the whole chat → APPROVED reveals both
+verified phone numbers in the chat; contact-info screening switches off for that conversation. Notes stored bilingual
+(`{"en","ml"}` JSON in contact_note, picked per viewer).
 
-## DATABASE SCHEMA (SQLAlchemy models — `backend-core/models.py`)
+## AI (lib/ai/llm.ts — official Anthropic SDK; Gemini via REST is wired but GEMINI_API_KEY not set)
+Jobs → model set in admin Settings: screen = claude-haiku-4-5; deep (interview, character, contact review) and vision
+(photo + selfie) = claude-sonnet-5-5 — Haiku's Malayalam was grammatically broken, Sonnet's is natural.
+Sonnet calls send `fallbacks: "default"` (server-side refusal fallback). A model refusal while screening blocks the
+message with no strike and queues it for a human. Every call metered in `ai_usage`; dashboard shows ₹ cost.
+askJson() lists the exact keys to return and schemas tolerate harmless variations — models DO invent key names
+otherwise. Malayalam is token-heavy: keep max_tokens generous (interview 2000/4000, character 6000).
 
-### `users`
-| Column | Type | Notes |
-|---|---|---|
-| id | Integer PK | |
-| identity_hash | String(64) UNIQUE | SHA-256 of gov ID |
-| intent_silo | Enum | MATRIMONY \| ALTERNATIVE |
-| stake_balance | Integer | default 0 |
-| reputation_score | Integer | default 0 |
-| is_physically_verified | Boolean | default False |
-| is_banned | Boolean | default False |
-| compatibility_blueprint | JSON | from AI interview |
-| lead_description | String(2000) | AI-generated bio |
-| profile_confidence | Enum | HIGH \| MEDIUM \| LOW \| null |
-| age, height_cm | Integer | nullable |
-| marital_status, mother_tongue | String(50) | nullable |
-| pref_age_min/max, pref_height_min/max | Integer | nullable |
-| pref_marital_status, pref_mother_tongue | JSON | nullable |
-| religion, caste, subcaste, gothram | String | nullable |
-| pref_religion, pref_caste | JSON | nullable |
-| nationality, country_of_residence, state, city | String | nullable |
-| pref_nationality, pref_country, pref_state | JSON | nullable |
-| education_level, field_of_study, occupation, annual_income | String | nullable |
-| pref_education_level, pref_occupation, pref_income_range | String/JSON | nullable |
-| diet, drinking, smoking | String(50) | nullable |
-| has_disability | Boolean | nullable |
-| pref_diet, pref_drinking_acceptable, pref_smoking_acceptable, pref_disability_acceptable | String/JSON | nullable |
-| manual_bio | String(300) | nullable |
-| bio_display_mode | String(20) | nullable |
+## Verification honesty
+Selfie = live camera + random gesture + AI comparison with profile photos (not biometric-grade); MEDIUM confidence →
+human review. Never verified with a real face on this machine (no camera in the Browser pane). AWS Rekognition
+liveness is the upgrade path if fakes get through.
 
-### `leads`
-| Column | Type | Notes |
-|---|---|---|
-| id | Integer PK | |
-| phone_number | String(20) UNIQUE | |
-| source | String(255) | |
-| language_preference | String(50) | default "english" |
-| ai_interview_completed | Boolean | default False |
-| compatibility_blueprint | JSON | nullable |
-| lead_description | String(2000) | nullable |
+## Android (android/)
+Kotlin WebView shell from the wesupportucc-android template, package `com.thuna.app`. Debug APK points at
+`http://localhost:3840/` (run `adb reverse tcp:3840 tcp:3840`; localhost keeps the camera a secure origin). Release:
+`android/build-apk.ps1 -Url https://domain/` — refuses to build without an https URL. `send-to-phone.ps1` installs over USB or
+serves on LAN :8391. Signing key `thuna-release.jks` + `keystore.pass.txt` (gitignored) — lose them and updates can't
+install over existing copies. Verified on emulator 2026-10-04: sign-in persists across force-stop, camera permission +
+live selfie + AI verdict, live chat, tel: number opens the dialer. Not verified: Razorpay UPI hand-off (no keys),
+push (WebView has no web push — needs FCM).
 
-### `interview_sessions`
-| Column | Type | Notes |
-|---|---|---|
-| id | Integer PK | |
-| lead_id | FK → leads.id | |
-| questions | JSON | list of {scenario, options} |
-| answers | JSON | list of str |
-| current_question_index | Integer | |
-| is_complete | Boolean | |
-| created_at | DateTime | |
-
-### `user_relationships`
-| Column | Type | Notes |
-|---|---|---|
-| id | Integer PK | |
-| user_id | String(50) | |
-| partner_id | String(50) | |
-| message_count | Integer | default 0 |
-| photo_unlocked | Boolean | default False |
-| UNIQUE(user_id, partner_id) | | |
-
-### `user_photos`
-| Column | Type | Notes |
-|---|---|---|
-| id | Integer PK | |
-| user_id | String(50) | |
-| filename | String(255) | UUID filename on disk |
-| is_primary | Boolean | |
-| sort_order | Integer | |
-| created_at | DateTime | |
-Served at: `/static/photos/{user_id}/{filename}`
-
-### `messages`
-| Column | Type | Notes |
-|---|---|---|
-| id | Integer PK | |
-| sender_id | String(50) | e.g. "lead-1", "user-bob" |
-| receiver_id | String(50) | |
-| content | String(4000) | |
-| timestamp | DateTime | |
-| is_read | Boolean | |
-
-### `flags`
-| Column | Type | Notes |
-|---|---|---|
-| id | Integer PK | |
-| flagger_user_id | FK → users.id | nullable (null = SYSTEM) |
-| flagged_user_id | FK → users.id | |
-| reason | String(500) | |
-| source | Enum | USER \| SYSTEM |
-| created_at | DateTime | |
-
----
-
-## API ROUTES (backend-core)
-
-| Router file | Prefix | Key endpoints |
-|---|---|---|
-| routes_users.py | /users | GET /users/discover, GET/POST/PATCH users |
-| routes_interview.py | /interview | AI interview session CRUD |
-| routes_messages.py | /messages | Chat message history |
-| routes_relationships.py | /relationships | message_count, photo_unlocked |
-| routes_photos.py | /photos | upload/list/delete user photos |
-| routes_flags.py | /flags | flag a user |
-| routes_admin.py | /admin | admin operations |
-| routes_ai.py | /ai | AI analysis endpoints |
-| routes_internal.py | /internal | internal service calls |
-| GET /health | — | health check |
-
----
-
-## PYDANTIC SCHEMAS (backend-core/schemas.py & schemas_ai.py)
-
-- `UserCreate`, `UserRead`, `UserUpdate`, `ProfileUpdate` — User CRUD
-- `LeadCreate`, `LeadRead`, `LeadUpdate`, `LeadPromoteRequest` — Lead CRUD + promote to user
-- `InterviewSessionRead`, `RespondRequest`, `RespondResult` — Interview flow
-- `MessageCreate`, `MessageRead` — Chat
-- `RelationshipRead` — photo unlock status
-- `PhotoRead` — photo metadata + absolute URL
-- `FlagCreate`, `FlagRead` — flagging
-- `DiscoverUserRead` — slim card for discovery feed (no preference fields)
-- AI schemas in `schemas_ai.py`
-
----
-
-## MOBILE APP SCREENS (mobile-app/src/screens/)
-
-| File | Screen |
-|---|---|
-| OnboardingScreen.tsx | User onboarding entry point |
-| InterviewScreen.tsx | AI interview UI |
-| ChatScreen.tsx | Real-time chat (Socket.io) |
-| DiscoveryScreen.tsx | Profile discovery feed |
-| ProfileScreen.tsx | Own profile view/edit |
-
-**Services:** `src/services/api.ts` (HTTP → backend-core:8000), `src/services/socket.ts` (Socket.io → backend-chat:3001)
-
-**Components:** `PhotoUploadSection.tsx`, `ProfileCard.tsx`
-
----
-
-## BUILD STATUS
-
-**BUILT:**
-- Full backend-core: all models, schemas, all 9 route files
-- backend-chat: Socket.io server (`server.js`) with tests
-- Mobile: all 5 screens, api + socket services, photo upload, profile card
-
-**NOT BUILT YET:**
-- Stake/token payment system (backend)
-- Physical verification flow
-- Push notifications
-- Production PostgreSQL migration (currently SQLite dev)
-- App store deployment
-
----
-
-## KEY FILES
-
-```
-backend-core/
-  main.py          — FastAPI app, router registration, static files
-  models.py        — All SQLAlchemy table definitions
-  schemas.py       — All Pydantic request/response schemas
-  schemas_ai.py    — AI-specific Pydantic schemas
-  database.py      — DB session / init_db()
-  config.py        — DEV_MODE flag, env config
-  routes_*.py      — One file per domain
-
-backend-chat/
-  server.js        — Socket.io server (port 3001)
-
-mobile-app/
-  src/screens/     — All screens
-  src/services/    — api.ts, socket.ts
-  components/      — Reusable UI components
-  src/data/profileOptions.ts — Dropdown option lists
-```
-
----
-
-## EXECUTION RULES
-
-- Write Pydantic schemas before logic. Never assume DB schema — it's fully defined above.
-- Keep I/O bounds separate from business logic.
-- Python: strict typing. TypeScript: Zod/interfaces.
-- `native_enum=False` on all SAEnum — portable across SQLite (dev) and PostgreSQL (prod).
+## Not done / needs Shibin
+Domain + hosting (needs persistent disk or R2 for photos), MSG91 SMS keys (DLT), Razorpay keys, Gemini key (optional,
+~10x cheaper screening), FCM for native push,
+Play Store billing if listed there (Google takes ~15% of in-app digital purchases).

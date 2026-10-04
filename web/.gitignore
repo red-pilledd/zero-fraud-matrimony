@@ -1,0 +1,9 @@
+node_modules
+.next
+.pgdata
+uploads
+.env.local
+*.tsbuildinfo
+next-env.d.ts
+admin-password.txt
+pg.log

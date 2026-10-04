@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Thuna mark (web/scripts/make-icons.mjs, 512 master) scaled 0.25 onto the 108 adaptive viewport. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.25"
+        android:scaleY="0.25"
+        android:translateX="-10"
+        android:translateY="-10.25">
+        <path
+            android:pathData="M256,360s-96,-58 -96,-138a54,54 0,0 1,96 -34a54,54 0,0 1,96 34c0,80 -96,138 -96,138z"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="22"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M256,226m-18,0a18,18 0,1 1,36 0a18,18 0,1 1,-36 0"
+            android:fillColor="#FFFFFF" />
+    </group>
+</vector>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Thuna's palette (web/app/globals.css): cream page, maroon brand, gold accent. -->
+<resources>
+    <color name="bg">#FFFBF6EE</color>
+    <color name="panel">#FFFFFFFF</color>
+    <color name="line">#FFEAD9CF</color>
+    <color name="ink">#FF2A1A1F</color>
+    <color name="ink_2">#FF75636A</color>
+    <color name="accent">#FF7B1E3A</color>
+    <color name="accent_dim">#FFF5DBE3</color>
+    <color name="brand">#FF7B1E3A</color>
+    <color name="gold">#FFC08A2E</color>
+</resources>

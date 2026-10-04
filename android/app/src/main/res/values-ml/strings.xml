@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="offline_title">ഇന്റർനെറ്റ് ഇല്ല</string>
+    <string name="offline_message">Thuna-യിൽ എത്താനായില്ല. ഫോണിലെ ഇന്റർനെറ്റ് പരിശോധിച്ച് വീണ്ടും ശ്രമിക്കൂ.</string>
+    <string name="server_error_title">സെർവർ പ്രതികരിക്കുന്നില്ല</string>
+    <string name="server_error_message">സാധാരണ ഇത് അൽപ്പനേരത്തേക്ക് മാത്രമാണ് — കുറച്ചു കഴിഞ്ഞ് വീണ്ടും ശ്രമിക്കൂ.</string>
+    <string name="retry">വീണ്ടും ശ്രമിക്കുക</string>
+    <string name="camera_denied">ക്യാമറ അനുമതി ഓഫാണ്, അതിനാൽ സെൽഫി പരിശോധന നടക്കില്ല. Settings › Apps › Thuna › Permissions-ൽ ഓണാക്കൂ.</string>
+    <string name="no_upi_app">ഈ ഫോണിൽ UPI ആപ്പ് ഇല്ല. GPay, PhonePe അല്ലെങ്കിൽ Paytm ഇൻസ്റ്റാൾ ചെയ്യൂ, അല്ലെങ്കിൽ കാർഡ് ഉപയോഗിക്കൂ.</string>
+</resources>

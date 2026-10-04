@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Thuna</string>
+    <string name="offline_title">No connection</string>
+    <string name="offline_message">Thuna could not be reached. Check the phone\'s internet connection and try again.</string>
+    <string name="server_error_title">Server not responding</string>
+    <string name="server_error_message">This is usually brief — try again in a moment.</string>
+    <string name="retry">Retry</string>
+    <string name="camera_denied">Camera access is off, so the selfie check cannot run. Turn it on in Settings › Apps › Thuna › Permissions.</string>
+    <string name="no_upi_app">No UPI app found on this phone. Install GPay, PhonePe or Paytm, or pay by card.</string>
+</resources>

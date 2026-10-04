@@ -1,0 +1,7 @@
+build/
+app/build/
+.gradle/
+local.properties
+thuna-release.jks
+keystore.pass.txt
+*.apk
